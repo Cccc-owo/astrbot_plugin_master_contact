@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 """
 
 _HELP_USER = """\
-/contact [消息] - 联系 Master（可附带首条消息）
+/contact start [消息] - 联系 Master（可附带首条消息）
 /contact send <n> - 接下来 n 条消息直接转发
 /contact cancel - 取消发送模式
 /contact end - 结束当前联系会话
@@ -164,6 +164,7 @@ class MasterContactPlugin(Star):
                 expired.append(sid)
         for sid in expired:
             self._remove_session(sid)
+        self._clean_expired_collectors()
         return expired
 
     def _build_header(self, event: AstrMessageEvent, sid: str) -> str:
@@ -280,12 +281,19 @@ class MasterContactPlugin(Star):
             yield self._handle_cancel(event)
             return
 
-        # --- default: master → list, user → start session ---
-        if is_master:
-            yield self._handle_list(event)
+        if sub == "start":
+            if is_master:
+                yield event.plain_result("该命令仅限用户使用。").stop_event()
+            else:
+                yield await self._handle_start(event)
             return
 
-        yield await self._handle_start(event)
+        # --- default: /contact → help ---
+        text = _HELP_MASTER if is_master else _HELP_USER
+        if sub:
+            yield event.plain_result(f"未知子命令 \"{sub}\"。\n{text}").stop_event()
+        else:
+            yield event.plain_result(text).stop_event()
 
     # --- Subcommand implementations ---
 
@@ -316,7 +324,7 @@ class MasterContactPlugin(Star):
         self._save_session(sid)
 
         raw = event.message_str.strip()
-        # Strip command name prefix from message_str
+        # Strip "contact"/"联系主人" and "start" subcommand from message_str
         for cmd in ("contact", "联系主人"):
             if raw == cmd:
                 raw = ""
@@ -324,6 +332,10 @@ class MasterContactPlugin(Star):
             if raw.startswith(cmd + " "):
                 raw = raw[len(cmd) :].strip()
                 break
+        if raw == "start":
+            raw = ""
+        elif raw.startswith("start "):
+            raw = raw[len("start") :].strip()
         text = raw
         media = [c for c in self._extract_forward_components(event) if not isinstance(c, Plain)]
         if text or media:
@@ -448,7 +460,7 @@ class MasterContactPlugin(Star):
         else:
             sid = self._user_sessions.get(umo)
             if not sid or sid not in self._sessions:
-                return event.plain_result("你当前没有活跃的联系会话，请先发送 /contact 发起联系。").stop_event()
+                return event.plain_result("你当前没有活跃的联系会话，请先发送 /contact start 发起联系。").stop_event()
 
         self._send_collectors[umo] = {
             "sid": sid,
@@ -469,7 +481,7 @@ class MasterContactPlugin(Star):
         umo = event.unified_msg_origin
         collector = self._send_collectors.pop(umo, None)
         if not collector:
-            return event.plain_result("你当前不在发送模式中。").stop_event()
+            return event.plain_result("你当前不在发送模式中。使用 /contact send <n> 进入发送模式。").stop_event()
         sid = collector["sid"]
         sent = collector["total"] - collector["remaining"]
         return event.plain_result(
@@ -549,7 +561,7 @@ class MasterContactPlugin(Star):
                 reply_text = reply_comp.message_str or ""
                 if SESSION_TAG_RE.search(reply_text):
                     yield event.plain_result(
-                        "联系会话已过期或已结束，如有需要请重新发送 /contact 发起联系。"
+                        "联系会话已过期或已结束，如有需要请重新发送 /contact start 发起联系。"
                     ).stop_event()
                 return
 
@@ -599,7 +611,7 @@ class MasterContactPlugin(Star):
         remaining = collector["remaining"]
         total = collector["total"]
         is_first = remaining == total
-        is_last = remaining == 1
+        is_last = remaining == 1  # Note: when total==1, both is_first and is_last are True
 
         # Update session activity
         session["last_activity"] = time.time()
@@ -610,14 +622,14 @@ class MasterContactPlugin(Star):
         if is_master:
             target_umo = session["user_umo"]
             # Build chain to send to user
-            if is_first:
+            if is_last:
+                # Last (or only) message: use _user_chain format with separator
+                chain = self._user_chain(sid, "回复本条消息发送内容给 Master", components)
+            elif is_first:
                 # Header message: "[联系#xxxx] Master 发来了 n 条消息如下："
                 header = f"{self._tag(sid)} Master 发来了 {total} 条消息如下：\n"
                 chain = MessageChain().message(header)
                 chain.chain.extend(components)
-            elif is_last:
-                # Last message: use _user_chain format with separator
-                chain = self._user_chain(sid, "回复本条消息发送内容给 Master", components)
             else:
                 # Middle messages: just the content with tag
                 chain = MessageChain().message(self._tag(sid) + "\n")
@@ -625,15 +637,15 @@ class MasterContactPlugin(Star):
             sent = await self.context.send_message(target_umo, chain)
         else:
             # Build chain to send to master
-            if is_first:
+            if is_last:
+                chain = MessageChain().message(self._tag(sid) + "\n")
+                chain.chain.extend(components)
+                chain.chain.append(Plain("\n------\n回复本条消息以回复用户"))
+            elif is_first:
                 header = self._build_header(event, sid)
                 intro = f"{header} 发来了 {total} 条消息如下：\n"
                 chain = MessageChain().message(intro)
                 chain.chain.extend(components)
-            elif is_last:
-                chain = MessageChain().message(self._tag(sid) + "\n")
-                chain.chain.extend(components)
-                chain.chain.append(Plain("\n------\n回复本条消息以回复用户"))
             else:
                 chain = MessageChain().message(self._tag(sid) + "\n")
                 chain.chain.extend(components)
