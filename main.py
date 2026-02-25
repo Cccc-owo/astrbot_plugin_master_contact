@@ -1,6 +1,8 @@
 import contextlib
+import json
 import re
 import secrets
+import sqlite3
 import time
 
 from astrbot.api import logger
@@ -14,6 +16,13 @@ from astrbot.core.star.star_tools import StarTools
 SESSION_TAG_RE = re.compile(r"\[联系#(\w+)\]")
 
 _GROUP_FORWARD_TYPES = (Plain, Image)
+
+_CREATE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS sessions (
+    sid TEXT PRIMARY KEY,
+    data TEXT NOT NULL
+)
+"""
 
 
 class ReplyToBotFilter(CustomFilter):
@@ -34,23 +43,47 @@ class MasterContactPlugin(Star):
         self.config = config or {}
         self._sessions: dict[str, dict] = {}
         self._user_sessions: dict[str, str] = {}
+        self._db: sqlite3.Connection | None = None
 
     async def initialize(self):
-        data = await self.get_kv_data("contact_sessions", {})
-        if isinstance(data, dict):
-            self._sessions = data
-        self._rebuild_index()
+        db_path = StarTools.get_data_dir() / "sessions.db"
+        self._db = sqlite3.connect(str(db_path))
+        self._db.execute(_CREATE_TABLE_SQL)
+        self._db.commit()
+        self._load_sessions()
 
     async def terminate(self):
-        await self._save_sessions()
+        if self._db:
+            self._db.close()
+            self._db = None
+
+    # --- DB helpers ---
+
+    def _load_sessions(self):
+        self._sessions = {}
+        if not self._db:
+            return
+        for row in self._db.execute("SELECT sid, data FROM sessions"):
+            self._sessions[row[0]] = json.loads(row[1])
+        self._rebuild_index()
+
+    def _save_session(self, sid: str):
+        if not self._db:
+            return
+        data = json.dumps(self._sessions[sid], ensure_ascii=False)
+        self._db.execute("INSERT OR REPLACE INTO sessions (sid, data) VALUES (?, ?)", (sid, data))
+        self._db.commit()
+
+    def _delete_session(self, sid: str):
+        if not self._db:
+            return
+        self._db.execute("DELETE FROM sessions WHERE sid = ?", (sid,))
+        self._db.commit()
 
     # --- Internal helpers ---
 
     def _rebuild_index(self):
         self._user_sessions = {info["user_umo"]: sid for sid, info in self._sessions.items()}
-
-    async def _save_sessions(self):
-        await self.put_kv_data("contact_sessions", self._sessions)
 
     def _generate_session_id(self) -> str:
         for _ in range(100):
@@ -105,6 +138,7 @@ class MasterContactPlugin(Star):
             umo = self._sessions[sid]["user_umo"]
             del self._sessions[sid]
             self._user_sessions.pop(umo, None)
+            self._delete_session(sid)
         return expired
 
     def _build_header(self, event: AstrMessageEvent, sid: str) -> str:
@@ -184,7 +218,7 @@ class MasterContactPlugin(Star):
             "paused": False,
         }
         self._user_sessions[umo] = sid
-        await self._save_sessions()
+        self._save_session(sid)
 
         text = event.message_str.strip()
         media = [c for c in self._extract_forward_components(event) if not isinstance(c, Plain)]
@@ -213,7 +247,7 @@ class MasterContactPlugin(Star):
         if umo in self._user_sessions:
             sid = self._user_sessions.pop(umo)
             self._sessions.pop(sid, None)
-            await self._save_sessions()
+            self._delete_session(sid)
             yield event.plain_result(self._user_msg(sid, "联系会话已结束。")).stop_event()
             return
 
@@ -226,7 +260,7 @@ class MasterContactPlugin(Star):
                 session = self._sessions.get(sid)
                 if session:
                     session["paused"] = True
-                    await self._save_sessions()
+                    self._save_session(sid)
                     yield event.plain_result(f"已暂停会话 #{sid} 的自动超时。").stop_event()
                 else:
                     yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
@@ -239,7 +273,7 @@ class MasterContactPlugin(Star):
                 if session:
                     session["paused"] = False
                     session["last_activity"] = time.time()
-                    await self._save_sessions()
+                    self._save_session(sid)
                     yield event.plain_result(f"已恢复会话 #{sid} 的自动超时。").stop_event()
                 else:
                     yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
@@ -250,7 +284,7 @@ class MasterContactPlugin(Star):
             if sid and sid in self._sessions:
                 session = self._sessions.pop(sid)
                 self._user_sessions.pop(session["user_umo"], None)
-                await self._save_sessions()
+                self._delete_session(sid)
                 with contextlib.suppress(Exception):
                     await self.context.send_message(
                         session["user_umo"],
@@ -291,7 +325,7 @@ class MasterContactPlugin(Star):
             if prefix and raw_text.startswith(prefix):
                 return
 
-        expired = self._clean_expired_sessions()
+        self._clean_expired_sessions()
 
         # Find Reply component
         reply_comp = None
@@ -317,7 +351,7 @@ class MasterContactPlugin(Star):
 
             # Master replied → reset timeout
             session["last_activity"] = time.time()
-            await self._save_sessions()
+            self._save_session(sid)
 
             # Forward master's message with session tag (excluding Reply/At)
             components = [m for m in event.get_messages() if not isinstance(m, (Reply, At))]
@@ -343,12 +377,9 @@ class MasterContactPlugin(Star):
                     ).stop_event()
                 return
 
-            if expired:
-                await self._save_sessions()
-
             # Update activity timestamp
             self._sessions[sid]["last_activity"] = time.time()
-            await self._save_sessions()
+            self._save_session(sid)
 
             header = self._build_header(event, sid)
             chain = MessageChain().message(header + "\n")
