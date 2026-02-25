@@ -17,8 +17,9 @@
 
 ## 功能
 
-- 用户通过 `/contact` 命令发起与 Master 的联系会话
+- 用户通过 `/contact start` 命令发起与 Master 的联系会话
 - 通过回复 bot 消息实现双向消息转发
+- 发送模式：`/contact send <n>` 连续发送 n 条消息直接转发，无需逐条回复
 - 支持附带首条消息直接发起联系
 - 支持多 Master 配置，广播通知 + 首位回复自动接入
 - 会话自动超时清理，支持暂停/恢复超时
@@ -33,21 +34,26 @@
 
 | 命令 | 说明 |
 |------|------|
-| `/contact` | 发起联系会话 |
-| `/contact [消息]` | 发起联系并附带首条消息 |
+| `/contact` | 显示帮助 |
+| `/contact start` | 发起联系会话 |
+| `/contact start [消息]` | 发起联系并附带首条消息 |
+| `/contact send <n>` | 进入发送模式，接下来 n 条消息直接转发 |
+| `/contact cancel` | 取消发送模式 |
 | `/contact end` | 结束当前联系会话 |
 | `/contact help` | 显示帮助 |
 
 别名：`/联系主人`
 
-发起联系后，**回复 bot 消息**即可继续发送内容给 Master。
+发起联系后，**回复 bot 消息**即可继续发送内容给 Master。也可以使用 `/contact send <n>` 进入发送模式，直接发送消息无需回复。
 
 ### Master 命令
 
 | 命令 | 说明 |
 |------|------|
-| `/contact` | 查看活跃会话列表 |
+| `/contact` | 显示帮助 |
 | `/contact list` | 查看活跃会话列表 |
+| `/contact send <n> [ID]` | 进入发送模式，接下来 n 条消息直接转发 |
+| `/contact cancel` | 取消发送模式 |
 | `/contact end <ID>` | 结束指定会话 |
 | `/contact pause <ID>` | 暂停会话自动超时 |
 | `/contact resume <ID>` | 恢复会话自动超时 |
@@ -71,6 +77,8 @@ https://github.com/Cccc-owo/astrbot-plugin-master-contact
 |--------|------|--------|
 | `master_sessions` | Master 的会话标识列表 (unified_msg_origin) | `[]` |
 | `session_timeout` | 会话超时时间（分钟），0 表示不超时 | `10` |
+| `send_max` | 发送模式最大消息条数 | `20` |
+| `send_timeout` | 发送模式超时时间（秒），0 表示不超时 | `300` |
 
 使用 AstrBot 内置的 `sid` 命令可查询当前会话的 unified_msg_origin。
 
