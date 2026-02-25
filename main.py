@@ -204,7 +204,10 @@ class MasterContactPlugin(Star):
     @filter.command("contact", alias={"联系主人"})
     async def handle_contact(self, event: AstrMessageEvent):
         """联系 Master，发送 /contact help 获取详细帮助"""
+        # message_str still contains command name after WakingCheckStage;
+        # skip it to get the actual subcommand and arguments.
         args = event.message_str.strip().split()
+        args = args[1:] if args and args[0] in ("contact", "联系主人") else args
         sub = args[0] if args else ""
 
         is_master = self._is_master(event)
@@ -277,7 +280,16 @@ class MasterContactPlugin(Star):
         self._user_sessions[umo] = sid
         self._save_session(sid)
 
-        text = event.message_str.strip()
+        raw = event.message_str.strip()
+        # Strip command name prefix from message_str
+        for cmd in ("contact", "联系主人"):
+            if raw == cmd:
+                raw = ""
+                break
+            if raw.startswith(cmd + " "):
+                raw = raw[len(cmd):].strip()
+                break
+        text = raw
         media = [c for c in self._extract_forward_components(event) if not isinstance(c, Plain)]
         if text or media:
             header = self._build_header(event, sid)
