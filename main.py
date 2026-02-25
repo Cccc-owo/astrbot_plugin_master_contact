@@ -229,16 +229,16 @@ class MasterContactPlugin(Star):
             sent = await self._send_to_master(chain)
             if sent:
                 yield event.plain_result(
-                    self._user_msg(sid, "已转发给主人，回复此消息继续发送。发送 /endcontact 结束联系。", text)
+                    self._user_msg(sid, "已转发给主人，回复此消息继续发送。发送 /contactend 结束联系。", text)
                 ).stop_event()
             else:
                 yield event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
         else:
             yield event.plain_result(
-                self._user_msg(sid, "已开始联系主人，回复此消息发送内容给主人。发送 /endcontact 结束联系。")
+                self._user_msg(sid, "已开始联系主人，回复此消息发送内容给主人。发送 /contactend 结束联系。")
             ).stop_event()
 
-    @filter.command("endcontact", alias={"结束联系"})
+    @filter.command("contactend", alias={"结束联系"})
     async def end_contact(self, event: AstrMessageEvent):
         """结束联系会话"""
         umo = event.unified_msg_origin
@@ -254,7 +254,7 @@ class MasterContactPlugin(Star):
         # Master operations
         if self._is_master(event):
             args = event.message_str.strip().split()
-            # /endcontact pause <id> — pause auto-timeout for a session
+            # /contactend pause <id> — pause auto-timeout for a session
             if len(args) >= 2 and args[0] == "pause":
                 sid = args[1]
                 session = self._sessions.get(sid)
@@ -266,7 +266,7 @@ class MasterContactPlugin(Star):
                     yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
                 return
 
-            # /endcontact resume <id> — resume auto-timeout for a session
+            # /contactend resume <id> — resume auto-timeout for a session
             if len(args) >= 2 and args[0] == "resume":
                 sid = args[1]
                 session = self._sessions.get(sid)
@@ -279,7 +279,7 @@ class MasterContactPlugin(Star):
                     yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
                 return
 
-            # /endcontact <id> — end a specific session
+            # /contactend <id> — end a specific session
             sid = args[0] if args else ""
             if sid and sid in self._sessions:
                 session = self._sessions.pop(sid)
@@ -293,15 +293,15 @@ class MasterContactPlugin(Star):
                 yield event.plain_result(f"已结束与 {session['user_name']} 的联系会话。").stop_event()
                 return
 
-            # /endcontact — list sessions
+            # /contactend — list sessions
             if self._sessions:
                 lines = ["当前活跃的联系会话:"]
                 for s_id, info in self._sessions.items():
                     status = " [已暂停]" if info.get("paused") else ""
                     lines.append(f"  #{s_id} - {info['user_name']}({info['user_id']}){status}")
-                lines.append("\n/endcontact <ID> 结束会话")
-                lines.append("/endcontact pause <ID> 暂停自动超时")
-                lines.append("/endcontact resume <ID> 恢复自动超时")
+                lines.append("\n/contactend <ID> 结束会话")
+                lines.append("/contactend pause <ID> 暂停自动超时")
+                lines.append("/contactend resume <ID> 恢复自动超时")
                 yield event.plain_result("\n".join(lines)).stop_event()
             else:
                 yield event.plain_result("当前没有活跃的联系会话。").stop_event()
