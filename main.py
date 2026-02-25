@@ -311,7 +311,7 @@ class MasterContactPlugin(Star):
 
     # --- Reply forwarding handler ---
 
-    @filter.custom_filter(ReplyToBotFilter())
+    @filter.custom_filter(ReplyToBotFilter)
     async def on_reply_to_bot(self, event: AstrMessageEvent):
         """处理回复 bot 消息的转发"""
         # Skip command messages: check original text (before WakingCheckStage strips prefix)
