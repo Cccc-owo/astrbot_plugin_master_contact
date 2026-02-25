@@ -181,12 +181,16 @@ class MasterContactPlugin(Star):
     def _tag(self, sid: str) -> str:
         return f"[联系#{sid}]"
 
-    def _user_msg(self, sid: str, hint: str, content: str = "") -> str:
-        """构建用户侧消息。有 content 时使用分隔格式，否则只有标记+提示。"""
-        tag = self._tag(sid)
-        if content:
-            return f"{tag}\n{content}\n------\n{hint}"
-        return f"{tag} {hint}"
+    def _user_msg(self, sid: str, hint: str) -> str:
+        """构建用户侧纯提示消息（无转发内容）。"""
+        return f"{self._tag(sid)} {hint}"
+
+    def _user_chain(self, sid: str, hint: str, components: list) -> MessageChain:
+        """构建用户侧带内容的消息链：标签 + 原样内容 + 分隔线 + 提示。"""
+        chain = MessageChain().message(self._tag(sid) + "\n")
+        chain.chain.extend(components)
+        chain.chain.append(Plain("\n------\n" + hint))
+        return chain
 
     def _extract_forward_components(self, event: AstrMessageEvent) -> list:
         is_group = not event.is_private_chat()
@@ -297,9 +301,11 @@ class MasterContactPlugin(Star):
             chain.chain.extend(media)
             sent = await self._send_to_master(chain)
             if sent:
-                return event.plain_result(
-                    self._user_msg(sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", text)
-                ).stop_event()
+                components = self._extract_forward_components(event)
+                result = event.chain_result(
+                    self._user_chain(sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", components).chain
+                )
+                return result.stop_event()
             else:
                 return event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
         else:
@@ -434,8 +440,8 @@ class MasterContactPlugin(Star):
 
             # Forward master's message with session tag (excluding Reply/At)
             components = [m for m in event.get_messages() if not isinstance(m, (Reply, At))]
-            chain = MessageChain().message(self._tag(sid) + " ")
-            chain.chain.extend(components)
+            hint = "回复本条消息发送内容给 Master"
+            chain = self._user_chain(sid, hint, components)
 
             sent = await self.context.send_message(session["user_umo"], chain)
             if sent:
