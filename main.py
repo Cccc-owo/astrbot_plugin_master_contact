@@ -563,11 +563,19 @@ class MasterContactPlugin(Star):
                 return
 
             # Master replied → claim session and reset timeout
-            claimed_by = session.get("master_umo")
-            if claimed_by and claimed_by != event.unified_msg_origin:
+            if self.config.get("claim_by_sender", False):
+                claim_key = "master_sender_id"
+                claim_val = str(event.get_sender_id())
+            else:
+                claim_key = "master_umo"
+                claim_val = event.unified_msg_origin
+            claimed_by = session.get(claim_key)
+            if claimed_by and claimed_by != claim_val:
                 yield event.plain_result("该会话已由其他 Master 接入。").stop_event()
                 return
             if not claimed_by:
+                session[claim_key] = claim_val
+            if not session.get("master_umo"):
                 session["master_umo"] = event.unified_msg_origin
             session["last_activity"] = time.time()
             self._save_session(sid)

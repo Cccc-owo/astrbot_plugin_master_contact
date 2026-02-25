@@ -22,5 +22,11 @@
         "type": "int",
         "hint": "进入发送模式后多久未发消息自动结束，0 表示不超时",
         "default": 300
+    },
+    "claim_by_sender": {
+        "description": "按发送者锁定会话",
+        "type": "bool",
+        "hint": "开启后以发送者 ID（而非会话来源）判断接入归属，适用于多 Master 共用同一群聊的场景",
+        "default": false
     }
 }
