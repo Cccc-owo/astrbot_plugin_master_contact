@@ -341,7 +341,7 @@ class MasterContactPlugin(Star):
         """主人查看活跃会话列表。"""
         self._clean_expired_sessions()
         if not self._sessions:
-            return event.plain_result("当前没有活跃的联系会话。").stop_event()
+            return event.plain_result("当前没有活跃的联系会话。\n发送 /contact help 查看可用命令。").stop_event()
         lines = ["当前活跃的联系会话:"]
         for s_id, info in self._sessions.items():
             flags = ""
