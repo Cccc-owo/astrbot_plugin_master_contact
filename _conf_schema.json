@@ -10,5 +10,17 @@
         "type": "int",
         "hint": "最后一条消息后多久自动结束会话，0 表示不超时",
         "default": 10
+    },
+    "send_max": {
+        "description": "发送模式最大消息条数",
+        "type": "int",
+        "hint": "/contact send <n> 中 n 的上限",
+        "default": 20
+    },
+    "send_timeout": {
+        "description": "发送模式超时时间（秒）",
+        "type": "int",
+        "hint": "进入发送模式后多久未发消息自动结束，0 表示不超时",
+        "default": 300
     }
 }

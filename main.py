@@ -7,6 +7,7 @@ import time
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import EventMessageType
 from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import At, Image, Plain, Reply
 from astrbot.core.message.message_event_result import MessageChain
@@ -26,11 +27,15 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 _HELP_USER = """\
 /contact [消息] - 联系 Master（可附带首条消息）
+/contact send <n> - 接下来 n 条消息直接转发
+/contact cancel - 取消发送模式
 /contact end - 结束当前联系会话
 /contact help - 显示此帮助"""
 
 _HELP_MASTER = """\
 /contact list - 查看活跃会话
+/contact send <n> [ID] - 接下来 n 条消息直接转发
+/contact cancel - 取消发送模式
 /contact end <ID> - 结束指定会话
 /contact pause <ID> - 暂停会话自动超时
 /contact resume <ID> - 恢复会话自动超时
@@ -55,6 +60,7 @@ class MasterContactPlugin(Star):
         self.config = config or {}
         self._sessions: dict[str, dict] = {}
         self._user_sessions: dict[str, str] = {}
+        self._send_collectors: dict[str, dict] = {}
         self._db: sqlite3.Connection | None = None
 
     async def initialize(self):
@@ -249,6 +255,14 @@ class MasterContactPlugin(Star):
                 yield event.plain_result("该命令仅限 Master 使用。").stop_event()
             return
 
+        if sub == "send":
+            yield self._handle_send(event, args[1:], is_master)
+            return
+
+        if sub == "cancel":
+            yield self._handle_cancel(event)
+            return
+
         # --- default: master → list, user → start session ---
         if is_master:
             yield self._handle_list(event)
@@ -291,7 +305,7 @@ class MasterContactPlugin(Star):
                 raw = ""
                 break
             if raw.startswith(cmd + " "):
-                raw = raw[len(cmd):].strip()
+                raw = raw[len(cmd) :].strip()
                 break
         text = raw
         media = [c for c in self._extract_forward_components(event) if not isinstance(c, Plain)]
@@ -303,7 +317,9 @@ class MasterContactPlugin(Star):
             if sent:
                 components = self._extract_forward_components(event)
                 result = event.chain_result(
-                    self._user_chain(sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", components).chain
+                    self._user_chain(
+                        sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", components
+                    ).chain
                 )
                 return result.stop_event()
             else:
@@ -387,6 +403,81 @@ class MasterContactPlugin(Star):
         session["last_activity"] = time.time()
         self._save_session(sid)
         return event.plain_result(f"已恢复会话 #{sid} 的自动超时。").stop_event()
+
+    def _get_send_max(self) -> int:
+        return max(1, int(self.config.get("send_max", 20)))
+
+    def _get_send_timeout(self) -> int:
+        return max(0, int(self.config.get("send_timeout", 300)))
+
+    def _handle_send(self, event: AstrMessageEvent, args: list[str], is_master: bool):
+        """进入发送模式，接下来 n 条消息直接转发。"""
+        umo = event.unified_msg_origin
+
+        if umo in self._send_collectors:
+            return event.plain_result("你已在发送模式中，请继续发送消息或 /contact cancel 取消。").stop_event()
+
+        # Parse count
+        if not args or not args[0].isdigit():
+            usage = "用法: /contact send <n>" + (" [ID]" if is_master else "")
+            return event.plain_result(usage).stop_event()
+        count = int(args[0])
+        send_max = self._get_send_max()
+        if count < 1 or count > send_max:
+            return event.plain_result(f"消息条数须在 1-{send_max} 之间。").stop_event()
+
+        # Resolve session
+        if is_master:
+            sid_arg = args[1] if len(args) > 1 else ""
+            if sid_arg:
+                if sid_arg not in self._sessions:
+                    return event.plain_result(f"会话 #{sid_arg} 不存在。").stop_event()
+                sid = sid_arg
+            elif len(self._sessions) == 1:
+                sid = next(iter(self._sessions))
+            else:
+                return event.plain_result("当前有多个活跃会话，请指定会话 ID: /contact send <n> <ID>").stop_event()
+        else:
+            sid = self._user_sessions.get(umo)
+            if not sid or sid not in self._sessions:
+                return event.plain_result("你当前没有活跃的联系会话，请先发送 /contact 发起联系。").stop_event()
+
+        self._send_collectors[umo] = {
+            "sid": sid,
+            "remaining": count,
+            "total": count,
+            "is_master": is_master,
+            "started_at": time.time(),
+        }
+        target = "用户" if is_master else "Master"
+        return event.plain_result(
+            self._user_msg(
+                sid, f"进入发送模式，接下来发送的 {count} 条消息将直接转发给 {target}。发送 /contact cancel 取消。"
+            )
+        ).stop_event()
+
+    def _handle_cancel(self, event: AstrMessageEvent):
+        """取消发送模式。"""
+        umo = event.unified_msg_origin
+        collector = self._send_collectors.pop(umo, None)
+        if not collector:
+            return event.plain_result("你当前不在发送模式中。").stop_event()
+        sid = collector["sid"]
+        sent = collector["total"] - collector["remaining"]
+        return event.plain_result(
+            self._user_msg(sid, f"已取消发送模式（已转发 {sent}/{collector['total']} 条）。")
+        ).stop_event()
+
+    def _clean_expired_collectors(self) -> list[str]:
+        """清理超时的 send 收集器，返回被清理的 UMO 列表。"""
+        now = time.time()
+        send_timeout = self._get_send_timeout()
+        expired = [
+            umo for umo, c in self._send_collectors.items() if send_timeout > 0 and now - c["started_at"] > send_timeout
+        ]
+        for umo in expired:
+            del self._send_collectors[umo]
+        return expired
 
     # --- Reply forwarding handler ---
 
@@ -473,3 +564,96 @@ class MasterContactPlugin(Star):
             sent = await self._send_to_master(chain, self._sessions[sid].get("master_umo", ""))
             if not sent:
                 yield event.plain_result(self._user_msg(sid, "转发失败，请等待 Master 检查。")).stop_event()
+
+    # --- Send-mode message interceptor ---
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def on_send_mode_message(self, event: AstrMessageEvent):
+        """在发送模式下拦截消息并转发。"""
+        umo = event.unified_msg_origin
+        collector = self._send_collectors.get(umo)
+        if not collector:
+            return
+
+        # Check timeout
+        if self._get_send_timeout() > 0 and time.time() - collector["started_at"] > self._get_send_timeout():
+            sent = collector["total"] - collector["remaining"]
+            del self._send_collectors[umo]
+            yield event.plain_result(
+                self._user_msg(collector["sid"], f"发送模式已超时（已转发 {sent}/{collector['total']} 条）。")
+            ).stop_event()
+            return
+
+        # Skip command messages
+        raw_text = ""
+        for _m in event.get_messages():
+            if isinstance(_m, Plain):
+                raw_text += _m.text
+        raw_text = raw_text.strip()
+        wake_prefixes = self.context.get_config().get("wake_prefix", [])
+        for prefix in wake_prefixes:
+            if prefix and raw_text.startswith(prefix):
+                return
+
+        sid = collector["sid"]
+        session = self._sessions.get(sid)
+        if not session:
+            del self._send_collectors[umo]
+            yield event.plain_result("联系会话已过期，发送模式已取消。").stop_event()
+            return
+
+        is_master = collector["is_master"]
+        remaining = collector["remaining"]
+        total = collector["total"]
+        is_first = remaining == total
+        is_last = remaining == 1
+
+        # Update session activity
+        session["last_activity"] = time.time()
+        self._save_session(sid)
+
+        components = self._extract_forward_components(event)
+
+        if is_master:
+            target_umo = session["user_umo"]
+            # Build chain to send to user
+            if is_first:
+                # Header message: "[联系#xxxx] Master 发来了 n 条消息如下："
+                header = f"{self._tag(sid)} Master 发来了 {total} 条消息如下：\n"
+                chain = MessageChain().message(header)
+                chain.chain.extend(components)
+            elif is_last:
+                # Last message: use _user_chain format with separator
+                chain = self._user_chain(sid, "回复本条消息发送内容给 Master", components)
+            else:
+                # Middle messages: just the content with tag
+                chain = MessageChain().message(self._tag(sid) + "\n")
+                chain.chain.extend(components)
+            sent = await self.context.send_message(target_umo, chain)
+        else:
+            # Build chain to send to master
+            if is_first:
+                header = self._build_header(event, sid)
+                intro = f"{header} 发来了 {total} 条消息如下：\n"
+                chain = MessageChain().message(intro)
+                chain.chain.extend(components)
+            elif is_last:
+                chain = MessageChain().message(self._tag(sid) + "\n")
+                chain.chain.extend(components)
+                chain.chain.append(Plain("\n------\n回复本条消息以回复用户"))
+            else:
+                chain = MessageChain().message(self._tag(sid) + "\n")
+                chain.chain.extend(components)
+            sent = await self._send_to_master(chain, session.get("master_umo", ""))
+
+        collector["remaining"] -= 1
+        if collector["remaining"] <= 0:
+            del self._send_collectors[umo]
+            target = "用户" if is_master else "Master"
+            yield event.plain_result(
+                self._user_msg(sid, f"发送模式已完成，{total} 条消息已转发给 {target}。")
+            ).stop_event()
+        elif sent:
+            yield event.plain_result(f"({collector['remaining']}/{total}) 继续发送...").stop_event()
+        else:
+            yield event.plain_result(self._user_msg(sid, "转发失败。")).stop_event()
