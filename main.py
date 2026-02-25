@@ -24,6 +24,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 )
 """
 
+_HELP_USER = """\
+/contact [消息] - 联系 Master（可附带首条消息）
+/contact end - 结束当前联系会话
+/contact help - 显示此帮助"""
+
+_HELP_MASTER = """\
+/contact list - 查看活跃会话
+/contact end <ID> - 结束指定会话
+/contact pause <ID> - 暂停会话自动超时
+/contact resume <ID> - 恢复会话自动超时
+/contact help - 显示此帮助"""
+
 
 class ReplyToBotFilter(CustomFilter):
     """仅当消息是回复 bot 消息时通过。"""
@@ -35,7 +47,7 @@ class ReplyToBotFilter(CustomFilter):
         return False
 
 
-@register("astrbot_plugin_master_contact", "Cccc_", "简易的联系主人插件", "0.1.0")
+@register("astrbot_plugin_master_contact", "Cccc_", "简易的联系 Master 插件", "0.1.0")
 class MasterContactPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None):
         super().__init__(context, config)
@@ -92,36 +104,38 @@ class MasterContactPlugin(Star):
                 return sid
         raise RuntimeError("无法生成唯一会话 ID")
 
-    def _get_master_session(self) -> str | None:
-        val = self.config.get("master_session", "")
-        return val if val else None
-
-    def _get_master_admin_id(self) -> str | None:
-        admins = self.context.get_config().get("admins_id", [])
-        return str(admins[0]) if admins else None
+    def _get_master_sessions(self) -> list[str]:
+        """返回配置的主人 UMO 列表。"""
+        val = self.config.get("master_sessions", [])
+        if isinstance(val, str):
+            return [v.strip() for v in val.split(",") if v.strip()]
+        if isinstance(val, list):
+            return [str(v).strip() for v in val if str(v).strip()]
+        return []
 
     def _is_master(self, event: AstrMessageEvent) -> bool:
-        master_session = self._get_master_session()
-        if master_session:
-            return event.unified_msg_origin == master_session
-        admin_id = self._get_master_admin_id()
-        if admin_id:
-            return str(event.get_sender_id()) == admin_id
-        return False
+        return event.unified_msg_origin in self._get_master_sessions()
 
-    async def _send_to_master(self, chain: MessageChain) -> bool:
-        master_session = self._get_master_session()
-        if master_session:
-            return await self.context.send_message(master_session, chain)
-        admin_id = self._get_master_admin_id()
-        if admin_id:
+    async def _send_to_master(self, chain: MessageChain, target_umo: str = "") -> bool:
+        """发送消息给主人。指定 target_umo 时只发给该主人，否则广播给所有主人。"""
+        if target_umo:
             try:
-                await StarTools.send_message_by_id("PrivateMessage", admin_id, chain)
-                return True
+                return bool(await self.context.send_message(target_umo, chain))
             except Exception as e:
-                logger.error(f"发送给主人失败: {e}")
+                logger.error(f"发送给主人 ({target_umo}) 失败: {e}")
                 return False
-        return False
+        targets = self._get_master_sessions()
+        if not targets:
+            return False
+        success = False
+        for umo in targets:
+            try:
+                result = await self.context.send_message(umo, chain)
+                if result:
+                    success = True
+            except Exception as e:
+                logger.error(f"发送给主人 ({umo}) 失败: {e}")
+        return success
 
     def _clean_expired_sessions(self) -> list[str]:
         timeout = self.config.get("session_timeout", 10)
@@ -150,9 +164,9 @@ class MasterContactPlugin(Star):
 
         parts = [f"[联系#{sid}]", "来自"]
 
-        master_session = self._get_master_session()
-        master_platform = master_session.split(":")[0] if master_session else "aiocqhttp"
-        if platform and platform != master_platform:
+        master_sessions = self._get_master_sessions()
+        master_platforms = {s.split(":")[0] for s in master_sessions if s}
+        if platform and platform not in master_platforms:
             parts.append(f"[{platform}]")
 
         if not event.is_private_chat():
@@ -185,18 +199,62 @@ class MasterContactPlugin(Star):
             components.append(msg)
         return components
 
-    # --- Command handlers ---
+    # --- Command handler ---
 
     @filter.command("contact", alias={"联系主人"})
-    async def contact_master(self, event: AstrMessageEvent):
-        """联系主人，建立消息转发通道"""
-        if not self._get_master_session() and not self._get_master_admin_id():
-            yield event.plain_result("未配置主人，无法使用此功能。请联系管理员配置。").stop_event()
+    async def handle_contact(self, event: AstrMessageEvent):
+        """联系 Master，发送 /contact help 获取详细帮助"""
+        args = event.message_str.strip().split()
+        sub = args[0] if args else ""
+
+        is_master = self._is_master(event)
+
+        # --- help ---
+        if sub == "help":
+            text = _HELP_MASTER if is_master else _HELP_USER
+            yield event.plain_result(text).stop_event()
             return
 
-        if self._is_master(event):
-            yield event.plain_result("你就是主人，无需联系自己。").stop_event()
+        # --- end ---
+        if sub == "end":
+            yield await self._handle_end(event, args[1:], is_master)
             return
+
+        # --- master-only subcommands ---
+        if sub == "list":
+            if is_master:
+                yield self._handle_list(event)
+            else:
+                yield event.plain_result("该命令仅限 Master 使用。").stop_event()
+            return
+
+        if sub == "pause":
+            if is_master:
+                yield self._handle_pause(event, args[1:])
+            else:
+                yield event.plain_result("该命令仅限 Master 使用。").stop_event()
+            return
+
+        if sub == "resume":
+            if is_master:
+                yield self._handle_resume(event, args[1:])
+            else:
+                yield event.plain_result("该命令仅限 Master 使用。").stop_event()
+            return
+
+        # --- default: master → list, user → start session ---
+        if is_master:
+            yield self._handle_list(event)
+            return
+
+        yield await self._handle_start(event)
+
+    # --- Subcommand implementations ---
+
+    async def _handle_start(self, event: AstrMessageEvent):
+        """用户发起联系会话。"""
+        if not self._get_master_sessions():
+            return event.plain_result("未配置 Master，无法使用此功能。请联系管理员配置。").stop_event()
 
         umo = event.unified_msg_origin
         self._clean_expired_sessions()
@@ -204,10 +262,9 @@ class MasterContactPlugin(Star):
         if umo in self._user_sessions:
             sid = self._user_sessions[umo]
             if sid in self._sessions:
-                yield event.plain_result(
+                return event.plain_result(
                     self._user_msg(sid, "你已有一个活跃的联系会话，回复此消息即可继续。")
                 ).stop_event()
-                return
 
         sid = self._generate_session_id()
         self._sessions[sid] = {
@@ -228,19 +285,18 @@ class MasterContactPlugin(Star):
             chain.chain.extend(media)
             sent = await self._send_to_master(chain)
             if sent:
-                yield event.plain_result(
-                    self._user_msg(sid, "已转发给主人，回复此消息继续发送。发送 /contactend 结束联系。", text)
+                return event.plain_result(
+                    self._user_msg(sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", text)
                 ).stop_event()
             else:
-                yield event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
+                return event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
         else:
-            yield event.plain_result(
-                self._user_msg(sid, "已开始联系主人，回复此消息发送内容给主人。发送 /contactend 结束联系。")
+            return event.plain_result(
+                self._user_msg(sid, "已开始联系 Master，回复此消息发送内容给 Master。发送 /contact end 结束联系。")
             ).stop_event()
 
-    @filter.command("contactend", alias={"结束联系"})
-    async def end_contact(self, event: AstrMessageEvent):
-        """结束联系会话"""
+    async def _handle_end(self, event: AstrMessageEvent, args: list[str], is_master: bool):
+        """结束联系会话。"""
         umo = event.unified_msg_origin
 
         # User ending their own session
@@ -248,38 +304,10 @@ class MasterContactPlugin(Star):
             sid = self._user_sessions.pop(umo)
             self._sessions.pop(sid, None)
             self._delete_session(sid)
-            yield event.plain_result(self._user_msg(sid, "联系会话已结束。")).stop_event()
-            return
+            return event.plain_result(self._user_msg(sid, "联系会话已结束。")).stop_event()
 
-        # Master operations
-        if self._is_master(event):
-            args = event.message_str.strip().split()
-            # /contactend pause <id> — pause auto-timeout for a session
-            if len(args) >= 2 and args[0] == "pause":
-                sid = args[1]
-                session = self._sessions.get(sid)
-                if session:
-                    session["paused"] = True
-                    self._save_session(sid)
-                    yield event.plain_result(f"已暂停会话 #{sid} 的自动超时。").stop_event()
-                else:
-                    yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
-                return
-
-            # /contactend resume <id> — resume auto-timeout for a session
-            if len(args) >= 2 and args[0] == "resume":
-                sid = args[1]
-                session = self._sessions.get(sid)
-                if session:
-                    session["paused"] = False
-                    session["last_activity"] = time.time()
-                    self._save_session(sid)
-                    yield event.plain_result(f"已恢复会话 #{sid} 的自动超时。").stop_event()
-                else:
-                    yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
-                return
-
-            # /contactend <id> — end a specific session
+        # Master ending a specific session
+        if is_master:
             sid = args[0] if args else ""
             if sid and sid in self._sessions:
                 session = self._sessions.pop(sid)
@@ -288,26 +316,59 @@ class MasterContactPlugin(Star):
                 with contextlib.suppress(Exception):
                     await self.context.send_message(
                         session["user_umo"],
-                        MessageChain().message(self._user_msg(sid, "主人已结束联系会话。")),
+                        MessageChain().message(self._user_msg(sid, "Master 已结束联系会话。")),
                     )
-                yield event.plain_result(f"已结束与 {session['user_name']} 的联系会话。").stop_event()
-                return
+                return event.plain_result(f"已结束与 {session['user_name']} 的联系会话。").stop_event()
+            if sid:
+                return event.plain_result(f"会话 #{sid} 不存在。").stop_event()
+            return event.plain_result("用法: /contact end <ID>").stop_event()
 
-            # /contactend — list sessions
-            if self._sessions:
-                lines = ["当前活跃的联系会话:"]
-                for s_id, info in self._sessions.items():
-                    status = " [已暂停]" if info.get("paused") else ""
-                    lines.append(f"  #{s_id} - {info['user_name']}({info['user_id']}){status}")
-                lines.append("\n/contactend <ID> 结束会话")
-                lines.append("/contactend pause <ID> 暂停自动超时")
-                lines.append("/contactend resume <ID> 恢复自动超时")
-                yield event.plain_result("\n".join(lines)).stop_event()
+        return event.plain_result("你当前没有活跃的联系会话。").stop_event()
+
+    def _handle_list(self, event: AstrMessageEvent):
+        """主人查看活跃会话列表。"""
+        self._clean_expired_sessions()
+        if not self._sessions:
+            return event.plain_result("当前没有活跃的联系会话。").stop_event()
+        lines = ["当前活跃的联系会话:"]
+        for s_id, info in self._sessions.items():
+            flags = ""
+            if info.get("paused"):
+                flags += " [不超时]"
+            if info.get("master_umo"):
+                flags += " [已接入]"
             else:
-                yield event.plain_result("当前没有活跃的联系会话。").stop_event()
-            return
+                flags += " [待接入]"
+            lines.append(f"  #{s_id} - {info['user_name']}({info['user_id']}){flags}")
+        lines.append("\n/contact end <ID> 结束会话")
+        lines.append("/contact pause <ID> 暂停自动超时")
+        lines.append("/contact resume <ID> 恢复自动超时")
+        return event.plain_result("\n".join(lines)).stop_event()
 
-        yield event.plain_result("你当前没有活跃的联系会话。").stop_event()
+    def _handle_pause(self, event: AstrMessageEvent, args: list[str]):
+        """主人暂停会话自动超时。"""
+        sid = args[0] if args else ""
+        if not sid:
+            return event.plain_result("用法: /contact pause <ID>").stop_event()
+        session = self._sessions.get(sid)
+        if not session:
+            return event.plain_result(f"会话 #{sid} 不存在。").stop_event()
+        session["paused"] = True
+        self._save_session(sid)
+        return event.plain_result(f"已暂停会话 #{sid} 的自动超时。").stop_event()
+
+    def _handle_resume(self, event: AstrMessageEvent, args: list[str]):
+        """主人恢复会话自动超时。"""
+        sid = args[0] if args else ""
+        if not sid:
+            return event.plain_result("用法: /contact resume <ID>").stop_event()
+        session = self._sessions.get(sid)
+        if not session:
+            return event.plain_result(f"会话 #{sid} 不存在。").stop_event()
+        session["paused"] = False
+        session["last_activity"] = time.time()
+        self._save_session(sid)
+        return event.plain_result(f"已恢复会话 #{sid} 的自动超时。").stop_event()
 
     # --- Reply forwarding handler ---
 
@@ -349,7 +410,13 @@ class MasterContactPlugin(Star):
                 yield event.plain_result("该联系会话已过期或不存在。").stop_event()
                 return
 
-            # Master replied → reset timeout
+            # Master replied → claim session and reset timeout
+            claimed_by = session.get("master_umo")
+            if claimed_by and claimed_by != event.unified_msg_origin:
+                yield event.plain_result("该会话已由其他 Master 接入。").stop_event()
+                return
+            if not claimed_by:
+                session["master_umo"] = event.unified_msg_origin
             session["last_activity"] = time.time()
             self._save_session(sid)
 
@@ -385,6 +452,6 @@ class MasterContactPlugin(Star):
             chain = MessageChain().message(header + "\n")
             chain.chain.extend(self._extract_forward_components(event))
 
-            sent = await self._send_to_master(chain)
+            sent = await self._send_to_master(chain, self._sessions[sid].get("master_umo", ""))
             if not sent:
-                yield event.plain_result(self._user_msg(sid, "转发失败，请等待主人检查。")).stop_event()
+                yield event.plain_result(self._user_msg(sid, "转发失败，请等待 Master 检查。")).stop_event()

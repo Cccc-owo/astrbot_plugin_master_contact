@@ -1,9 +1,9 @@
 {
-    "master_session": {
-        "description": "主人的会话标识 (unified_msg_origin)",
-        "type": "string",
-        "hint": "格式: 平台ID:消息类型:会话ID。例: aiocqhttp:FriendMessage:123456。留空则使用全局管理员列表的第一位。",
-        "default": ""
+    "master_sessions": {
+        "description": "Master 的会话标识列表 (unified_msg_origin)",
+        "type": "list",
+        "hint": "使用命令sid查询对话相关信息。例: bot:FriendMessage:12345",
+        "default": []
     },
     "session_timeout": {
         "description": "会话超时时间（分钟）",
