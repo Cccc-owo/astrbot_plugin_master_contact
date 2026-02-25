@@ -103,6 +103,14 @@ class MasterContactPlugin(Star):
     def _rebuild_index(self):
         self._user_sessions = {info["user_umo"]: sid for sid, info in self._sessions.items()}
 
+    def _remove_session(self, sid: str) -> dict | None:
+        """移除会话并清理索引和 DB，返回被移除的 session dict。"""
+        session = self._sessions.pop(sid, None)
+        if session:
+            self._user_sessions.pop(session["user_umo"], None)
+            self._delete_session(sid)
+        return session
+
     def _generate_session_id(self) -> str:
         for _ in range(100):
             sid = secrets.token_hex(2)
@@ -155,10 +163,7 @@ class MasterContactPlugin(Star):
             if now - info["last_activity"] > timeout * 60:
                 expired.append(sid)
         for sid in expired:
-            umo = self._sessions[sid]["user_umo"]
-            del self._sessions[sid]
-            self._user_sessions.pop(umo, None)
-            self._delete_session(sid)
+            self._remove_session(sid)
         return expired
 
     def _build_header(self, event: AstrMessageEvent, sid: str) -> str:
@@ -197,6 +202,18 @@ class MasterContactPlugin(Star):
         chain.chain.extend(components)
         chain.chain.append(Plain("\n------\n" + hint))
         return chain
+
+    def _is_wake_command(self, event: AstrMessageEvent) -> bool:
+        """检查消息是否以唤醒前缀开头（即为命令消息）。"""
+        raw_text = ""
+        for _m in event.get_messages():
+            if isinstance(_m, Plain):
+                raw_text += _m.text
+        raw_text = raw_text.strip()
+        for prefix in self.context.get_config().get("wake_prefix", []):
+            if prefix and raw_text.startswith(prefix):
+                return True
+        return False
 
     def _extract_forward_components(self, event: AstrMessageEvent) -> list:
         is_group = not event.is_private_chat()
@@ -243,14 +260,14 @@ class MasterContactPlugin(Star):
 
         if sub == "pause":
             if is_master:
-                yield self._handle_pause(event, args[1:])
+                yield self._handle_set_pause(event, args[1:], paused=True)
             else:
                 yield event.plain_result("该命令仅限 Master 使用。").stop_event()
             return
 
         if sub == "resume":
             if is_master:
-                yield self._handle_resume(event, args[1:])
+                yield self._handle_set_pause(event, args[1:], paused=False)
             else:
                 yield event.plain_result("该命令仅限 Master 使用。").stop_event()
             return
@@ -335,18 +352,16 @@ class MasterContactPlugin(Star):
 
         # User ending their own session
         if umo in self._user_sessions:
-            sid = self._user_sessions.pop(umo)
-            self._sessions.pop(sid, None)
-            self._delete_session(sid)
+            sid = self._user_sessions[umo]
+            self._remove_session(sid)
             return event.plain_result(self._user_msg(sid, "联系会话已结束。")).stop_event()
 
         # Master ending a specific session
         if is_master:
             sid = args[0] if args else ""
             if sid and sid in self._sessions:
-                session = self._sessions.pop(sid)
-                self._user_sessions.pop(session["user_umo"], None)
-                self._delete_session(sid)
+                session = self._remove_session(sid)
+                assert session is not None
                 with contextlib.suppress(Exception):
                     await self.context.send_message(
                         session["user_umo"],
@@ -379,30 +394,21 @@ class MasterContactPlugin(Star):
         lines.append("/contact resume <ID> 恢复自动超时")
         return event.plain_result("\n".join(lines)).stop_event()
 
-    def _handle_pause(self, event: AstrMessageEvent, args: list[str]):
-        """主人暂停会话自动超时。"""
+    def _handle_set_pause(self, event: AstrMessageEvent, args: list[str], paused: bool):
+        """主人暂停/恢复会话自动超时。"""
         sid = args[0] if args else ""
+        cmd = "pause" if paused else "resume"
         if not sid:
-            return event.plain_result("用法: /contact pause <ID>").stop_event()
+            return event.plain_result(f"用法: /contact {cmd} <ID>").stop_event()
         session = self._sessions.get(sid)
         if not session:
             return event.plain_result(f"会话 #{sid} 不存在。").stop_event()
-        session["paused"] = True
+        session["paused"] = paused
+        if not paused:
+            session["last_activity"] = time.time()
         self._save_session(sid)
-        return event.plain_result(f"已暂停会话 #{sid} 的自动超时。").stop_event()
-
-    def _handle_resume(self, event: AstrMessageEvent, args: list[str]):
-        """主人恢复会话自动超时。"""
-        sid = args[0] if args else ""
-        if not sid:
-            return event.plain_result("用法: /contact resume <ID>").stop_event()
-        session = self._sessions.get(sid)
-        if not session:
-            return event.plain_result(f"会话 #{sid} 不存在。").stop_event()
-        session["paused"] = False
-        session["last_activity"] = time.time()
-        self._save_session(sid)
-        return event.plain_result(f"已恢复会话 #{sid} 的自动超时。").stop_event()
+        action = "暂停" if paused else "恢复"
+        return event.plain_result(f"已{action}会话 #{sid} 的自动超时。").stop_event()
 
     def _get_send_max(self) -> int:
         return max(1, int(self.config.get("send_max", 20)))
@@ -435,6 +441,8 @@ class MasterContactPlugin(Star):
                 sid = sid_arg
             elif len(self._sessions) == 1:
                 sid = next(iter(self._sessions))
+            elif not self._sessions:
+                return event.plain_result("当前没有活跃的联系会话。").stop_event()
             else:
                 return event.plain_result("当前有多个活跃会话，请指定会话 ID: /contact send <n> <ID>").stop_event()
         else:
@@ -484,16 +492,8 @@ class MasterContactPlugin(Star):
     @filter.custom_filter(ReplyToBotFilter)
     async def on_reply_to_bot(self, event: AstrMessageEvent):
         """处理回复 bot 消息的转发"""
-        # Skip command messages: check original text (before WakingCheckStage strips prefix)
-        raw_text = ""
-        for _m in event.get_messages():
-            if isinstance(_m, Plain):
-                raw_text += _m.text
-        raw_text = raw_text.strip()
-        wake_prefixes = self.context.get_config().get("wake_prefix", [])
-        for prefix in wake_prefixes:
-            if prefix and raw_text.startswith(prefix):
-                return
+        if self._is_wake_command(event):
+            return
 
         self._clean_expired_sessions()
 
@@ -585,15 +585,8 @@ class MasterContactPlugin(Star):
             return
 
         # Skip command messages
-        raw_text = ""
-        for _m in event.get_messages():
-            if isinstance(_m, Plain):
-                raw_text += _m.text
-        raw_text = raw_text.strip()
-        wake_prefixes = self.context.get_config().get("wake_prefix", [])
-        for prefix in wake_prefixes:
-            if prefix and raw_text.startswith(prefix):
-                return
+        if self._is_wake_command(event):
+            return
 
         sid = collector["sid"]
         session = self._sessions.get(sid)
