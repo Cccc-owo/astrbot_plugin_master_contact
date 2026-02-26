@@ -152,7 +152,7 @@ class MasterContactPlugin(Star):
         return success
 
     async def _clean_expired_sessions(self) -> list[str]:
-        timeout = self.config.get("session_timeout", 10)
+        timeout = self.config.get("session_timeout", 1440)
         if timeout <= 0:
             return []
         now = time.time()
@@ -253,6 +253,20 @@ class MasterContactPlugin(Star):
                 continue
             components.append(msg)
         return components
+
+    def _extract_sid_from_reply(self, reply_comp: Reply) -> str | None:
+        """从 Reply 组件中提取会话 ID，优先 message_str，fallback chain。"""
+        text = reply_comp.message_str or ""
+        match = SESSION_TAG_RE.search(text)
+        if match:
+            return match.group(1)
+        if reply_comp.chain:
+            for comp in reply_comp.chain:
+                if isinstance(comp, Plain):
+                    match = SESSION_TAG_RE.search(comp.text)
+                    if match:
+                        return match.group(1)
+        return None
 
     # --- Command handler ---
 
@@ -544,6 +558,26 @@ class MasterContactPlugin(Star):
             del self._send_collectors[umo]
         return expired
 
+    async def _forward_user_to_master(self, event: AstrMessageEvent, sid: str) -> str:
+        """用户消息转发给 Master，返回提示文本。"""
+        session = self._sessions[sid]
+        session["last_activity"] = time.time()
+        self._save_session(sid)
+
+        header = self._build_header(event, sid)
+        components = self._extract_forward_components(event)
+        parts = self._prepend_text(header + "\n", components)
+        parts = self._append_text(parts, "\n------\n回复本条消息以回复用户")
+        chain = MessageChain()
+        chain.chain.extend(parts)
+
+        sent = await self._send_to_master(chain, session.get("master_umo", ""))
+        if not sent:
+            return self._user_msg(sid, "转发失败，请等待 Master 检查。")
+        if not session.get("master_umo"):
+            return self._user_msg(sid, "已转发给 Master。Master 暂未接入会话，请耐心等待。")
+        return self._user_msg(sid, "已转发给 Master。")
+
     # --- Reply forwarding handler ---
 
     @filter.custom_filter(ReplyToBotFilter)
@@ -565,12 +599,10 @@ class MasterContactPlugin(Star):
 
         if self._is_master(event):
             # Master replying → route to user
-            reply_text = reply_comp.message_str or ""
-            match = SESSION_TAG_RE.search(reply_text)
-            if not match:
+            sid = self._extract_sid_from_reply(reply_comp)
+            if not sid:
                 return
 
-            sid = match.group(1)
             session = self._sessions.get(sid)
             if not session:
                 yield event.plain_result("该联系会话已过期或不存在。").stop_event()
@@ -611,29 +643,14 @@ class MasterContactPlugin(Star):
             sid = self._user_sessions.get(umo)
             if not sid or sid not in self._sessions:
                 # Check if replying to a message from this plugin
-                reply_text = reply_comp.message_str or ""
-                if SESSION_TAG_RE.search(reply_text):
+                if self._extract_sid_from_reply(reply_comp):
                     yield event.plain_result(
                         "联系会话已过期或已结束，如有需要请重新发送 /contact start 发起联系。"
                     ).stop_event()
                 return
 
-            # Update activity timestamp
-            self._sessions[sid]["last_activity"] = time.time()
-            self._save_session(sid)
-
-            header = self._build_header(event, sid)
-            components = self._extract_forward_components(event)
-            parts = self._prepend_text(header + "\n", components)
-            parts = self._append_text(parts, "\n------\n回复本条消息以回复用户")
-            chain = MessageChain()
-            chain.chain.extend(parts)
-
-            sent = await self._send_to_master(chain, self._sessions[sid].get("master_umo", ""))
-            if sent:
-                yield event.plain_result(self._user_msg(sid, "已转发给 Master。")).stop_event()
-            else:
-                yield event.plain_result(self._user_msg(sid, "转发失败，请等待 Master 检查。")).stop_event()
+            hint = await self._forward_user_to_master(event, sid)
+            yield event.plain_result(hint).stop_event()
 
     # --- Send-mode message interceptor ---
 
@@ -738,3 +755,26 @@ class MasterContactPlugin(Star):
             ).stop_event()
         else:
             yield event.plain_result(self._user_msg(sid, "转发失败。")).stop_event()
+
+    # --- Private chat fallback ---
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def on_private_chat_fallback(self, event: AstrMessageEvent):
+        """私聊用户有活跃会话时，非命令消息直接转发给 Master。"""
+        if not event.is_private_chat():
+            return
+        if self._is_master(event):
+            return
+        if self._is_wake_command(event):
+            return
+        # 已被 send mode 处理的消息不再处理
+        if event.unified_msg_origin in self._send_collectors:
+            return
+
+        umo = event.unified_msg_origin
+        sid = self._user_sessions.get(umo)
+        if not sid or sid not in self._sessions:
+            return
+
+        hint = await self._forward_user_to_master(event, sid)
+        yield event.plain_result(hint).stop_event()
