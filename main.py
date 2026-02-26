@@ -631,7 +631,11 @@ class MasterContactPlugin(Star):
             hint = "回复本条消息发送内容给 Master"
             chain = self._user_chain(sid, hint, components)
 
-            sent = await self.context.send_message(session["user_umo"], chain)
+            try:
+                sent = await self.context.send_message(session["user_umo"], chain)
+            except Exception:
+                logger.error(f"转发消息给用户失败 (sid={sid})")
+                sent = False
             if sent:
                 yield event.plain_result("已转发给用户。").stop_event()
             else:
