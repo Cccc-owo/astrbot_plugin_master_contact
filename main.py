@@ -335,9 +335,11 @@ class MasterContactPlugin(Star):
         if umo in self._user_sessions:
             sid = self._user_sessions[umo]
             if sid in self._sessions:
-                return event.plain_result(
-                    self._user_msg(sid, "你已有一个活跃的联系会话，回复此消息即可继续。")
-                ).stop_event()
+                if event.is_private_chat():
+                    hint = "你已有一个活跃的联系会话，直接发送消息即可继续。"
+                else:
+                    hint = "你已有一个活跃的联系会话，回复此消息即可继续。"
+                return event.plain_result(self._user_msg(sid, hint)).stop_event()
 
         sid = self._generate_session_id()
         self._sessions[sid] = {
@@ -382,18 +384,20 @@ class MasterContactPlugin(Star):
             sent = await self._send_to_master(chain)
             if sent:
                 # Echo to user: tag + components + separator + hint
-                result = event.chain_result(
-                    self._user_chain(
-                        sid, "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。", components
-                    ).chain
-                )
+                if event.is_private_chat():
+                    echo_hint = "已转发给 Master，直接发送消息继续。发送 /contact end 结束联系。"
+                else:
+                    echo_hint = "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。"
+                result = event.chain_result(self._user_chain(sid, echo_hint, components).chain)
                 return result.stop_event()
             else:
                 return event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
         else:
-            return event.plain_result(
-                self._user_msg(sid, "已开始联系 Master，回复此消息发送内容给 Master。发送 /contact end 结束联系。")
-            ).stop_event()
+            if event.is_private_chat():
+                hint = "已开始联系 Master，直接发送消息即可。发送 /contact end 结束联系。"
+            else:
+                hint = "已开始联系 Master，回复此消息发送内容给 Master。发送 /contact end 结束联系。"
+            return event.plain_result(self._user_msg(sid, hint)).stop_event()
 
     async def _handle_end(self, event: AstrMessageEvent, args: list[str], is_master: bool):
         """结束联系会话。"""
@@ -631,6 +635,11 @@ class MasterContactPlugin(Star):
             # User replying → forward to master
             umo = event.unified_msg_origin
             sid = self._user_sessions.get(umo)
+
+            # 私聊有活跃会话时由 on_private_chat_fallback 统一处理
+            if event.is_private_chat() and sid and sid in self._sessions:
+                return
+
             if not sid or sid not in self._sessions:
                 # Check if replying to a message from this plugin
                 if self._extract_sid_from_reply(reply_comp):
