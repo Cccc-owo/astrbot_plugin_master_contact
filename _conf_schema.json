@@ -28,5 +28,11 @@
         "type": "bool",
         "hint": "开启后以发送者 ID（而非会话来源）判断接入归属，适用于多 Master 共用同一群聊的场景",
         "default": false
+    },
+    "unclaimed_limit": {
+        "description": "未接入会话消息上限",
+        "type": "int",
+        "hint": "Master 接入前用户最多可发送的消息条数，0 表示不限制",
+        "default": 3
     }
 }

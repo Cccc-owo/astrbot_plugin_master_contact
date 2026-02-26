@@ -195,7 +195,7 @@ class MasterContactPlugin(Star):
 
     def _user_msg(self, sid: str, hint: str) -> str:
         """构建用户侧纯提示消息（无转发内容）。"""
-        return f"{self._tag(sid)} {hint}"
+        return f"{self._tag(sid)}\n{hint}"
 
     def _prepend_text(self, prefix: str, components: list) -> list:
         """在组件列表前插入文本，如果首个组件是 Plain 则合并，否则插入新 Plain。"""
@@ -209,9 +209,10 @@ class MasterContactPlugin(Star):
             return components[:-1] + [Plain(components[-1].text + suffix)]
         return components + [Plain(suffix)]
 
-    def _user_chain(self, sid: str, hint: str, components: list) -> MessageChain:
+    def _user_chain(self, sid: str, hint: str, components: list, *, from_master: bool = False) -> MessageChain:
         """构建用户侧带内容的消息链：标签 + 原样内容 + 分隔线 + 提示。"""
-        parts = self._prepend_text(self._tag(sid) + "\n", components)
+        label = f"{self._tag(sid)} Master\n" if from_master else f"{self._tag(sid)}\n"
+        parts = self._prepend_text(label, components)
         parts = self._append_text(parts, "\n------\n" + hint)
         chain = MessageChain()
         chain.chain.extend(parts)
@@ -348,6 +349,7 @@ class MasterContactPlugin(Star):
             "user_id": str(event.get_sender_id()),
             "last_activity": time.time(),
             "paused": False,
+            "unclaimed_count": 0,
         }
         self._user_sessions[umo] = sid
         self._save_session(sid)
@@ -383,20 +385,28 @@ class MasterContactPlugin(Star):
             chain.chain.extend(parts)
             sent = await self._send_to_master(chain)
             if sent:
+                self._sessions[sid]["unclaimed_count"] = 1
+                self._save_session(sid)
                 # Echo to user: tag + components + separator + hint
+                limit = self.config.get("unclaimed_limit", 3)
                 if event.is_private_chat():
                     echo_hint = "已转发给 Master，直接发送消息继续。发送 /contact end 结束联系。"
                 else:
                     echo_hint = "已转发给 Master，回复此消息继续发送。发送 /contact end 结束联系。"
+                if limit > 0:
+                    echo_hint += f"\nMaster 接入前还可发送 {limit - 1} 条消息，请简要说明问题。"
                 result = event.chain_result(self._user_chain(sid, echo_hint, components).chain)
                 return result.stop_event()
             else:
                 return event.plain_result(self._user_msg(sid, "已建立联系会话，但消息转发失败，请重试。")).stop_event()
         else:
+            limit = self.config.get("unclaimed_limit", 3)
             if event.is_private_chat():
                 hint = "已开始联系 Master，直接发送消息即可。发送 /contact end 结束联系。"
             else:
                 hint = "已开始联系 Master，回复此消息发送内容给 Master。发送 /contact end 结束联系。"
+            if limit > 0:
+                hint += f"\nMaster 接入前最多可发送 {limit} 条消息，请简要说明问题。"
             return event.plain_result(self._user_msg(sid, hint)).stop_event()
 
     async def _handle_end(self, event: AstrMessageEvent, args: list[str], is_master: bool):
@@ -555,20 +565,41 @@ class MasterContactPlugin(Star):
     async def _forward_user_to_master(self, event: AstrMessageEvent, sid: str) -> str:
         """用户消息转发给 Master，返回提示文本。"""
         session = self._sessions[sid]
+        unclaimed = not session.get("master_umo")
+        limit = self.config.get("unclaimed_limit", 3)
+
+        # Rate limit for unclaimed sessions
+        if unclaimed and limit > 0:
+            count = session.get("unclaimed_count", 0)
+            if count >= limit:
+                return self._user_msg(sid, f"Master 暂未接入，已达消息上限（{limit} 条）。请耐心等待 Master 回复。")
+
         session["last_activity"] = time.time()
+        if unclaimed:
+            session["unclaimed_count"] = session.get("unclaimed_count", 0) + 1
         self._save_session(sid)
 
         header = self._build_header(event, sid)
         components = self._extract_forward_components(event)
         parts = self._prepend_text(header + "\n", components)
-        parts = self._append_text(parts, "\n------\n回复本条消息以回复用户")
+        parts = self._append_text(parts, f"\n{self._tag(sid)}\n------\n回复本条消息以回复用户")
         chain = MessageChain()
         chain.chain.extend(parts)
 
         sent = await self._send_to_master(chain, session.get("master_umo", ""))
         if not sent:
             return self._user_msg(sid, "转发失败，请等待 Master 检查。")
-        if not session.get("master_umo"):
+        if unclaimed:
+            count = session.get("unclaimed_count", 0)
+            if limit > 0:
+                remaining = limit - count
+                if remaining > 0:
+                    return self._user_msg(
+                        sid, f"已转发。Master 暂未接入，还可发送 {remaining} 条消息。请简要说明问题。"
+                    )
+                return self._user_msg(
+                    sid, f"已转发。Master 暂未接入，已达消息上限（{limit} 条）。请耐心等待 Master 回复。"
+                )
             return self._user_msg(sid, "已转发给 Master。Master 暂未接入会话，请耐心等待。")
         return self._user_msg(sid, "已转发给 Master。")
 
@@ -615,6 +646,7 @@ class MasterContactPlugin(Star):
                 return
             if not claimed_by:
                 session[claim_key] = claim_val
+                session["unclaimed_count"] = 0
             if not session.get("master_umo"):
                 session["master_umo"] = event.unified_msg_origin
             session["last_activity"] = time.time()
@@ -623,7 +655,7 @@ class MasterContactPlugin(Star):
             # Forward master's message with session tag
             components = self._extract_forward_components(event)
             hint = "回复本条消息发送内容给 Master"
-            chain = self._user_chain(sid, hint, components)
+            chain = self._user_chain(sid, hint, components, from_master=True)
 
             try:
                 sent = await self.context.send_message(session["user_umo"], chain)
@@ -711,7 +743,7 @@ class MasterContactPlugin(Star):
 
             # Prefix: independent message before first content
             if is_first:
-                prefix = MessageChain().message(f"{self._tag(sid)} Master 发来了 {total} 条消息如下：")
+                prefix = MessageChain().message(f"{self._tag(sid)} Master\n发来了 {total} 条消息如下：")
                 await send(target_umo, prefix)
 
             # Content: always sent as-is, fallback on failure
@@ -723,7 +755,7 @@ class MasterContactPlugin(Star):
 
             # Suffix: independent message after last content
             if is_last:
-                suffix = MessageChain().message(self._tag(sid) + "\n------\n回复本条消息发送内容给 Master")
+                suffix = MessageChain().message(self._tag(sid) + " Master\n------\n回复本条消息发送内容给 Master")
                 sent = await send(target_umo, suffix)
             else:
                 sent = True
