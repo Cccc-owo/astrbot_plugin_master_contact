@@ -151,7 +151,7 @@ class MasterContactPlugin(Star):
                 logger.error(f"发送给主人 ({umo}) 失败: {e}")
         return success
 
-    async def _clean_expired_sessions(self) -> list[str]:
+    def _clean_expired_sessions(self) -> list[str]:
         timeout = self.config.get("session_timeout", 1440)
         if timeout <= 0:
             return []
@@ -163,21 +163,7 @@ class MasterContactPlugin(Star):
             if now - info["last_activity"] > timeout * 60:
                 expired.append(sid)
         for sid in expired:
-            session = self._remove_session(sid)
-            if session:
-                tag = self._tag(sid)
-                with contextlib.suppress(Exception):
-                    await self.context.send_message(
-                        session["user_umo"],
-                        MessageChain().message(f"{tag} 联系会话已超时。"),
-                    )
-                master_umo = session.get("master_umo", "")
-                if master_umo:
-                    with contextlib.suppress(Exception):
-                        await self.context.send_message(
-                            master_umo,
-                            MessageChain().message(f"{tag} 联系会话已超时。"),
-                        )
+            self._remove_session(sid)
         self._clean_expired_collectors()
         return expired
 
@@ -295,7 +281,7 @@ class MasterContactPlugin(Star):
         # --- master-only subcommands ---
         if sub == "list":
             if is_master:
-                yield await self._handle_list(event)
+                yield self._handle_list(event)
             else:
                 yield event.plain_result("该命令仅限 Master 使用。").stop_event()
             return
@@ -344,7 +330,7 @@ class MasterContactPlugin(Star):
             return event.plain_result("未配置 Master，无法使用此功能。请联系管理员配置。").stop_event()
 
         umo = event.unified_msg_origin
-        await self._clean_expired_sessions()
+        self._clean_expired_sessions()
 
         if umo in self._user_sessions:
             sid = self._user_sessions[umo]
@@ -445,9 +431,9 @@ class MasterContactPlugin(Star):
 
         return event.plain_result("你当前没有活跃的联系会话。").stop_event()
 
-    async def _handle_list(self, event: AstrMessageEvent):
+    def _handle_list(self, event: AstrMessageEvent):
         """主人查看活跃会话列表。"""
-        await self._clean_expired_sessions()
+        self._clean_expired_sessions()
         if not self._sessions:
             return event.plain_result("当前没有活跃的联系会话。\n发送 /contact help 查看可用命令。").stop_event()
         lines = ["当前活跃的联系会话:"]
@@ -586,7 +572,7 @@ class MasterContactPlugin(Star):
         if self._is_wake_command(event):
             return
 
-        await self._clean_expired_sessions()
+        self._clean_expired_sessions()
 
         # Find Reply component
         reply_comp = None
