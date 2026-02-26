@@ -201,7 +201,7 @@ class MasterContactPlugin(Star):
         else:
             parts.append("私聊")
 
-        parts.append(f"{user_name}({user_id}):")
+        parts.append(f"{user_name}({user_id})")
         return " ".join(parts)
 
     def _tag(self, sid: str) -> str:
@@ -211,11 +211,24 @@ class MasterContactPlugin(Star):
         """构建用户侧纯提示消息（无转发内容）。"""
         return f"{self._tag(sid)} {hint}"
 
+    def _prepend_text(self, prefix: str, components: list) -> list:
+        """在组件列表前插入文本，如果首个组件是 Plain 则合并，否则插入新 Plain。"""
+        if components and isinstance(components[0], Plain):
+            return [Plain(prefix + components[0].text)] + components[1:]
+        return [Plain(prefix)] + components
+
+    def _append_text(self, components: list, suffix: str) -> list:
+        """在组件列表后追加文本，如果末尾组件是 Plain 则合并，否则追加新 Plain。"""
+        if components and isinstance(components[-1], Plain):
+            return components[:-1] + [Plain(components[-1].text + suffix)]
+        return components + [Plain(suffix)]
+
     def _user_chain(self, sid: str, hint: str, components: list) -> MessageChain:
         """构建用户侧带内容的消息链：标签 + 原样内容 + 分隔线 + 提示。"""
-        chain = MessageChain().message(self._tag(sid) + "\n")
-        chain.chain.extend(components)
-        chain.chain.append(Plain("\n------\n" + hint))
+        parts = self._prepend_text(self._tag(sid) + "\n", components)
+        parts = self._append_text(parts, "\n------\n" + hint)
+        chain = MessageChain()
+        chain.chain.extend(parts)
         return chain
 
     def _is_wake_command(self, event: AstrMessageEvent) -> bool:
@@ -362,9 +375,10 @@ class MasterContactPlugin(Star):
 
             # Forward to master: header + components + hint
             header = self._build_header(event, sid)
-            chain = MessageChain().message(header + "\n")
-            chain.chain.extend(components)
-            chain.chain.append(Plain("\n------\n回复本条消息以回复用户"))
+            parts = self._prepend_text(header + "\n", components)
+            parts = self._append_text(parts, "\n------\n回复本条消息以回复用户")
+            chain = MessageChain()
+            chain.chain.extend(parts)
             sent = await self._send_to_master(chain)
             if sent:
                 # Echo to user: tag + components + separator + hint
@@ -609,12 +623,16 @@ class MasterContactPlugin(Star):
             self._save_session(sid)
 
             header = self._build_header(event, sid)
-            chain = MessageChain().message(header + "\n")
-            chain.chain.extend(self._extract_forward_components(event))
-            chain.chain.append(Plain("\n------\n回复本条消息以回复用户"))
+            components = self._extract_forward_components(event)
+            parts = self._prepend_text(header + "\n", components)
+            parts = self._append_text(parts, "\n------\n回复本条消息以回复用户")
+            chain = MessageChain()
+            chain.chain.extend(parts)
 
             sent = await self._send_to_master(chain, self._sessions[sid].get("master_umo", ""))
-            if not sent:
+            if sent:
+                yield event.plain_result(self._user_msg(sid, "已转发给 Master。")).stop_event()
+            else:
                 yield event.plain_result(self._user_msg(sid, "转发失败，请等待 Master 检查。")).stop_event()
 
     # --- Send-mode message interceptor ---
@@ -690,7 +708,7 @@ class MasterContactPlugin(Star):
 
             # Prefix
             if is_first:
-                header = self._build_header(event, sid).rstrip(":")
+                header = self._build_header(event, sid)
                 prefix = MessageChain().message(f"{header} 发来了 {total} 条消息如下：")
                 await send_master(prefix, master_umo)
 
