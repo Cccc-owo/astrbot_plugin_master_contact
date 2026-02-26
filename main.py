@@ -27,14 +27,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 _HELP_USER = """\
 /contact start [消息] - 联系 Master（可附带首条消息）
-/contact send <n> - 接下来 n 条消息直接转发
+/contact send <n> - 批量转发接下来 n 条消息（群聊用）
 /contact cancel - 取消发送模式
 /contact end - 结束当前联系会话
 /contact help - 显示此帮助"""
 
 _HELP_MASTER = """\
 /contact list - 查看活跃会话
-/contact send <n> [ID] - 接下来 n 条消息直接转发
+/contact send <n> [ID] - 批量转发接下来 n 条消息给用户
 /contact cancel - 取消发送模式
 /contact end <ID> - 结束指定会话
 /contact pause <ID> - 暂停会话自动超时
@@ -481,6 +481,10 @@ class MasterContactPlugin(Star):
         """进入发送模式，接下来 n 条消息直接转发。"""
         umo = event.unified_msg_origin
 
+        # 私聊用户不需要 send 模式，直接发送即可
+        if not is_master and event.is_private_chat():
+            return event.plain_result("私聊中无需使用发送模式，直接发送消息即可转发。").stop_event()
+
         if umo in self._send_collectors:
             return event.plain_result("你已在发送模式中，请继续发送消息或 /contact cancel 取消。").stop_event()
 
@@ -674,6 +678,11 @@ class MasterContactPlugin(Star):
         if self._is_wake_command(event):
             return
 
+        # 过滤空消息
+        components = self._extract_forward_components(event)
+        if not components or all(isinstance(c, Plain) and not c.text.strip() for c in components):
+            return
+
         sid = collector["sid"]
         session = self._sessions.get(sid)
         if not session:
@@ -768,6 +777,10 @@ class MasterContactPlugin(Star):
             return
         # 已被 send mode 处理的消息不再处理
         if event.unified_msg_origin in self._send_collectors:
+            return
+        # 过滤空消息（如 QQ 输入状态变化产生的空事件）
+        components = self._extract_forward_components(event)
+        if not components or all(isinstance(c, Plain) and not c.text.strip() for c in components):
             return
 
         umo = event.unified_msg_origin
