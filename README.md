@@ -19,9 +19,11 @@
 
 - 用户通过 `/contact start` 命令发起与 Master 的联系会话
 - 通过回复 bot 消息实现双向消息转发
-- 发送模式：`/contact send <n>` 连续发送 n 条消息直接转发，无需逐条回复
+- 私聊用户有活跃会话时直接发送消息即可转发，无需回复
+- 转发模式：`/contact forward` 进入持续转发，消息原样转发无需逐条回复
 - 支持附带首条消息直接发起联系
 - 支持多 Master 配置，广播通知 + 首位回复自动接入
+- Master 接入前限流，防止消息轰炸
 - 会话自动超时清理，支持暂停/恢复超时
 - 群聊场景仅转发文本和图片，私聊转发全部内容
 - 基于 SQLite 持久化存储，重启不丢失会话
@@ -34,26 +36,24 @@
 
 | 命令 | 说明 |
 |------|------|
-| `/contact` | 显示帮助 |
 | `/contact start` | 发起联系会话 |
 | `/contact start [消息]` | 发起联系并附带首条消息 |
-| `/contact send <n>` | 进入发送模式，接下来 n 条消息直接转发 |
-| `/contact cancel` | 取消发送模式 |
+| `/contact forward` | 进入转发模式，消息原样转发（群聊用） |
+| `/contact forward done` | 结束转发模式 |
 | `/contact end` | 结束当前联系会话 |
 | `/contact help` | 显示帮助 |
 
 别名：`/联系主人`
 
-发起联系后，**回复 bot 消息**即可继续发送内容给 Master。也可以使用 `/contact send <n>` 进入发送模式，直接发送消息无需回复。
+发起联系后，**回复 bot 消息**即可继续发送内容给 Master。私聊用户直接发送消息即可自动转发。群聊用户也可以使用 `/contact forward` 进入转发模式，直接发送消息无需回复。
 
 ### Master 命令
 
 | 命令 | 说明 |
 |------|------|
-| `/contact` | 显示帮助 |
 | `/contact list` | 查看活跃会话列表 |
-| `/contact send <n> [ID]` | 进入发送模式，接下来 n 条消息直接转发 |
-| `/contact cancel` | 取消发送模式 |
+| `/contact forward [ID]` | 进入转发模式 |
+| `/contact forward done` | 结束转发模式 |
 | `/contact end <ID>` | 结束指定会话 |
 | `/contact pause <ID>` | 暂停会话自动超时 |
 | `/contact resume <ID>` | 恢复会话自动超时 |
@@ -76,9 +76,10 @@ https://github.com/Cccc-owo/astrbot-plugin-master-contact
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `master_sessions` | Master 的会话标识列表 (unified_msg_origin) | `[]` |
-| `session_timeout` | 会话超时时间（分钟），0 表示不超时 | `10` |
-| `send_max` | 发送模式最大消息条数 | `20` |
-| `send_timeout` | 发送模式超时时间（秒），0 表示不超时 | `300` |
+| `session_timeout` | 会话超时时间（分钟），0 表示不超时 | `1440` |
+| `forward_timeout` | 转发模式超时时间（秒），0 表示不超时 | `300` |
+| `claim_by_sender` | 按发送者 ID 锁定会话归属（适用于多 Master 共用群聊） | `false` |
+| `unclaimed_limit` | Master 接入前用户最多可发送的消息条数，0 表示不限制 | `3` |
 
 使用 AstrBot 内置的 `sid` 命令可查询当前会话的 unified_msg_origin。
 

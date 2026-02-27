@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.2.0
+
+### 新功能
+
+- 转发模式重构：`/contact forward` 进入，`/contact forward done` 结束，无需预先指定消息条数
+- 私聊用户有活跃会话时直接发消息即可转发，无需回复 bot
+- Master 接入前消息限流（`unclaimed_limit`），防止用户刷屏
+
+### 改进
+
+- 转发模式改为空闲超时，持续发消息不会被中断
+- 私聊和群聊场景自动适配回复提示
+- 精简 Master 转发结束时用户收到的通知
+
+### 配置变更
+
+- 移除 `send_max`、`send_timeout`
+- 新增 `forward_timeout`（原 `send_timeout`，默认 300 秒）
+- 新增 `unclaimed_limit`（默认 3 条）
+
 ## v1.1.1
 
 ### 新功能
