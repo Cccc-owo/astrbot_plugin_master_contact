@@ -21,7 +21,6 @@
 - 通过回复 bot 消息实现双向消息转发
 - 私聊用户有活跃会话时直接发送消息即可转发，无需回复
 - 转发模式：`/contact forward` 进入持续转发，消息原样转发无需逐条回复
-- 支持附带首条消息直接发起联系
 - 支持多 Master 配置，广播通知 + 首位回复自动接入
 - Master 接入前限流，防止消息轰炸
 - 会话自动超时清理，支持暂停/恢复超时
@@ -37,11 +36,10 @@
 | 命令 | 说明 |
 |------|------|
 | `/contact start` | 发起联系会话 |
-| `/contact start [消息]` | 发起联系并附带首条消息 |
 | `/contact forward` | 进入转发模式，消息原样转发（群聊用） |
 | `/contact forward done` | 结束转发模式 |
 | `/contact end` | 结束当前联系会话 |
-| `/contact help` | 显示帮助 |
+| `/contact` | 显示命令帮助 |
 
 别名：`/联系主人`
 
@@ -57,7 +55,7 @@
 | `/contact end <ID>` | 结束指定会话 |
 | `/contact pause <ID>` | 暂停会话自动超时 |
 | `/contact resume <ID>` | 恢复会话自动超时 |
-| `/contact help` | 显示帮助 |
+| `/contact` | 显示命令帮助 |
 
 Master 通过**回复转发消息**来回复用户。首位回复的 Master 自动接入该会话。
 
