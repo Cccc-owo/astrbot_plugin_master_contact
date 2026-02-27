@@ -434,17 +434,13 @@ class MasterContactPlugin(Star):
         yield event.plain_result("你当前没有活跃的联系会话。").stop_event()
 
     @contact_group.command("forward")
-    async def handle_forward(self, event: AstrMessageEvent):
+    async def handle_forward(self, event: AstrMessageEvent, sid: str = ""):
         """进入/结束转发模式"""
         umo = event.unified_msg_origin
         is_master = self._is_master(event)
 
-        # 提取 "forward" 后的参数（done 或会话 ID）
-        parts = event.message_str.strip().split()
-        arg = parts[2] if len(parts) > 2 else ""
-
         # /contact forward done
-        if arg == "done":
+        if sid == "done":
             collector = self._send_collectors.pop(umo, None)
             if not collector:
                 yield event.plain_result("你当前不在转发模式中。").stop_event()
@@ -467,11 +463,10 @@ class MasterContactPlugin(Star):
             return
 
         if is_master:
-            if arg:
-                if arg not in self._sessions:
-                    yield event.plain_result(f"会话 #{arg} 不存在。").stop_event()
+            if sid:
+                if sid not in self._sessions:
+                    yield event.plain_result(f"会话 #{sid} 不存在。").stop_event()
                     return
-                sid = arg
             elif len(self._sessions) == 1:
                 sid = next(iter(self._sessions))
             elif not self._sessions:
@@ -481,7 +476,7 @@ class MasterContactPlugin(Star):
                 yield event.plain_result("当前有多个活跃会话，请指定会话 ID: /contact forward <ID>").stop_event()
                 return
         else:
-            sid = self._user_sessions.get(umo)
+            sid = self._user_sessions.get(umo, "")
             if not sid or sid not in self._sessions:
                 yield event.plain_result("你当前没有活跃的联系会话，请先发送 /contact start 发起联系。").stop_event()
                 return
